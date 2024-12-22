@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { Lexend } from "next/font/google";
-import PlausibleProvider from "next-plausible";
 import "./globals.css";
 
 const inter = Lexend({ subsets: ["latin"] });
@@ -43,9 +42,6 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <head>
-        <PlausibleProvider domain="turboseek.io" />
-      </head>
       <body
         className={`${inter.className} flex min-h-screen flex-col justify-between`}
       >

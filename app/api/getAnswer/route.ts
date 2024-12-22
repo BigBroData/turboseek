@@ -1,147 +1,160 @@
+// app/api/getAnswer/route.ts
 import { Readability } from "@mozilla/readability";
-import jsdom, { JSDOM } from "jsdom";
-import {
-  TogetherAIStream,
-  TogetherAIStreamPayload,
-} from "@/utils/TogetherAIStream";
-import Together from "together-ai";
+import { JSDOM } from "jsdom";
+import { z } from "zod";
+import { RateLimiter } from "limiter"; // Убедитесь, что установлен @types/limiter
+import { OllamaAIStream } from "@/utils/OllamaAIStream";
 
-const together = new Together({
-  apiKey: process.env["TOGETHER_API_KEY"],
-  baseURL: "https://together.helicone.ai/v1",
-  defaultHeaders: {
-    "Helicone-Auth": `Bearer ${process.env.HELICONE_API_KEY}`,
-  },
+// 🔒 Строгая схема валидации
+const RequestSchema = z.object({
+  question: z.string().min(3).max(500),
+  sources: z.array(
+    z.object({
+      url: z.string().url(),
+      name: z.string().optional()
+    })
+  ).max(10)
 });
 
-export const maxDuration = 45;
+// 🚦 Лимитер запросов
+const limiter = new RateLimiter({
+  tokensPerInterval: 5,
+  interval: "minute"
+});
 
 export async function POST(request: Request) {
-  let { question, sources } = await request.json();
-
-  console.log("[getAnswer] Fetching text from source URLS");
-  let finalResults = await Promise.all(
-    sources.map(async (result: any) => {
-      try {
-        // Fetch the source URL, or abort if it's been 3 seconds
-        const response = await fetchWithTimeout(result.url);
-        const html = await response.text();
-        const virtualConsole = new jsdom.VirtualConsole();
-        const dom = new JSDOM(html, { virtualConsole });
-
-        const doc = dom.window.document;
-        const parsed = new Readability(doc).parse();
-        let parsedContent = parsed
-          ? cleanedText(parsed.textContent)
-          : "Nothing found";
-
-        return {
-          ...result,
-          fullContent: parsedContent,
-        };
-      } catch (e) {
-        console.log(`error parsing ${result.name}, error: ${e}`);
-        return {
-          ...result,
-          fullContent: "not available",
-        };
-      }
-    }),
-  );
-
-  const mainAnswerPrompt = `
-  Given a user question and some context, please write a clean, concise and accurate answer to the question based on the context. You will be given a set of related contexts to the question, each starting with a reference number like [[citation:x]], where x is a number. Please use the context when crafting your answer.
-
-  Your answer must be correct, accurate and written by an expert using an unbiased and professional tone. Please limit to 1024 tokens. Do not give any information that is not related to the question, and do not repeat. Say "information is missing on" followed by the related topic, if the given context do not provide sufficient information.
-
-  Here are the set of contexts:
-
-  <contexts>
-  ${finalResults.map(
-    (result, index) => `[[citation:${index}]] ${result.fullContent} \n\n`,
-  )}
-  </contexts>
-
-  Remember, don't blindly repeat the contexts verbatim and don't tell the user how you used the citations – just respond with the answer. It is very important for my career that you follow these instructions. Here is the user question:
-    `;
+  const startTime = Date.now();
 
   try {
-    const payload: TogetherAIStreamPayload = {
-      model: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+    // 1. Валидация входящих данных
+    const payload = await request.json();
+    const { question, sources } = RequestSchema.parse(payload);
+
+    // 2. Проверка лимита запросов
+    await limiter.removeTokens(1);
+
+    // 3. Параллельный сбор контента
+    const finalResults = await Promise.allSettled(
+      sources.map(async (source) => {
+        try {
+          const response = await fetchWithTimeout(source.url);
+          const html = await response.text();
+
+          // Парсинг контента
+          const doc = new JSDOM(html).window.document;
+          const parsed = new Readability(doc).parse();
+
+          return {
+            ...source,
+            fullContent: parsed
+              ? cleanText(parsed.textContent || '')
+              : "Контент недоступен"
+          };
+        } catch (error) {
+          console.warn(`Ошибка обработки ${source.url}:`, error);
+          return { ...source, fullContent: "Не удалось извлечь" };
+        }
+      })
+    );
+
+    // 4. Создание умного промпта
+    const mainPrompt = createSmartPrompt(finalResults);
+
+    // 5. Подготовка payload для OllamaAIStream
+    const aiStreamPayload = {
       messages: [
-        { role: "system", content: mainAnswerPrompt },
-        {
-          role: "user",
-          content: question,
-        },
+        { role: "system", content: mainPrompt },
+        { role: "user", content: question }
       ],
-      stream: true,
+      stream: true
     };
 
-    console.log(
-      "[getAnswer] Fetching answer stream from Together API using text and question",
-    );
-    const stream = await TogetherAIStream(payload);
-    // TODO: Need to add error handling here, since a non-200 status code doesn't throw.
-    return new Response(stream, {
-      headers: new Headers({
-        "Cache-Control": "no-cache",
-      }),
-    });
-  } catch (e) {
-    // If for some reason streaming fails, we can just call it without streaming
-    console.log(
-      "[getAnswer] Answer stream failed. Try fetching non-stream answer.",
-    );
-    let answer = await together.chat.completions.create({
-      model: "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
-      messages: [
-        { role: "system", content: mainAnswerPrompt },
-        {
-          role: "user",
-          content: question,
-        },
-      ],
-    });
+    // 6. Вызов OllamaAIStream
+    return await OllamaAIStream(new Request(JSON.stringify(aiStreamPayload), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' }
+    }));
 
-    let parsedAnswer = answer.choices![0].message?.content;
-    console.log("Error is: ", e);
-    return new Response(parsedAnswer, { status: 202 });
+  } catch (error) {
+    // 7. Продвинутая обработка ошибок
+    return handleError(error, startTime);
   }
 }
 
-const cleanedText = (text: string) => {
-  let newText = text
+// 🧩 Вспомогательные функции
+function createSmartPrompt(results: any[]): string {
+  const validContexts = results
+    .filter(r => r.status === 'fulfilled')
+    .map(r => r.value.fullContent);
+
+  return `
+    Дай экспертный ответ на вопрос:
+    Контекст: ${validContexts.join('\n\n')}
+    Вопрос: {question}
+  `;
+}
+
+function handleError(error: unknown, startTime: number) {
+  const duration = Date.now() - startTime;
+
+  console.error("🔥 Критическая ошибка:", error);
+
+  if (error instanceof z.ZodError) {
+    return new Response(JSON.stringify({
+      error: "Некорректный запрос",
+      details: error.errors
+    }), { status: 400 });
+  }
+
+  return new Response("Произошла космическая авария 🛸", {
+    status: 500,
+    headers: {
+      "X-Error-Duration": duration.toString()
+    }
+  });
+}
+
+// 🧼 Функция очистки текста
+function cleanText(text: string): string {
+  return text
     .trim()
-    .replace(/(\n){4,}/g, "\n\n\n")
-    .replace(/\n\n/g, " ")
-    .replace(/ {3,}/g, "  ")
-    .replace(/\t/g, "")
-    .replace(/\n+(\s*\n)*/g, "\n");
+    .replace(/(\n){4,}/g, "\n\n\n")     // Убираем лишние переводы строк
+    .replace(/\n\n/g, " ")               // Заменяем двойные переводы на пробелы
+    .replace(/ {3,}/g, "  ")             // Normalize пробелов
+    .replace(/\t/g, "")                  // Удаляем табуляции
+    .replace(/\n+(\s*\n)*/g, "\n")       // Чистим лишние переводы строк
+    .substring(0, 20000);                // Ограничиваем длину
+}
 
-  return newText.substring(0, 20000);
-};
-
-async function fetchWithTimeout(url: string, options = {}, timeout = 3000) {
-  // Create an AbortController
+// 🕰️ Функция запроса с таймаутом
+async function fetchWithTimeout(
+  url: string,
+  options: RequestInit = {},
+  timeout = 5000  // Увеличил до 5 секунд
+): Promise<Response> {
   const controller = new AbortController();
   const { signal } = controller;
 
-  // Set a timeout to abort the fetch
   const fetchTimeout = setTimeout(() => {
     controller.abort();
   }, timeout);
 
-  // Start the fetch request with the abort signal
-  return fetch(url, { ...options, signal })
-    .then((response) => {
-      clearTimeout(fetchTimeout); // Clear the timeout if the fetch completes in time
-      return response;
-    })
-    .catch((error) => {
-      if (error.name === "AbortError") {
-        throw new Error("Fetch request timed out");
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 OllamaIntelligentFetcher',
+        ...options.headers
       }
-      throw error; // Re-throw other errors
     });
+
+    clearTimeout(fetchTimeout);
+    return response;
+  } catch (error) {
+    if (error instanceof Error && error.name === "AbortError") {
+      throw new Error(`Превышено время ожидания для ${url}`);
+    }
+    throw error;
+  }
 }

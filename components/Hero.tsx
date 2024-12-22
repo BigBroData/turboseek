@@ -21,8 +21,7 @@ const Hero: FC<THeroProps> = ({
     <div className="flex flex-col items-center justify-center">
       <a
         className="mb-4 inline-flex h-7 shrink-0 items-center gap-[9px] rounded-[50px] border-[0.5px] border-solid border-[#E6E6E6] bg-white px-3 py-4 shadow-[0px_1px_1px_0px_rgba(0,0,0,0.25)]"
-        href="https://www.together.ai/"
-        target="_blank"
+        href="#"
       >
         <Image
           unoptimized
@@ -32,7 +31,7 @@ const Hero: FC<THeroProps> = ({
           height={18}
         />
         <span className="text-center text-base font-light leading-[normal] text-[#1B1B16]">
-          Powered by Together AI
+          Powered by Local LLM
         </span>
       </a>
       <h2 className="bg-custom-gradient bg-clip-text pb-7 pt-2 text-center text-3xl font-semibold leading-[normal] lg:text-[64px]">
@@ -71,7 +70,7 @@ const Hero: FC<THeroProps> = ({
         ))}
       </div>
 
-      {/* Github link section */}
+      {/* GitHub link section */}
       <p className="text-center text-sm font-light leading-[normal] text-[#1B1B16]">
         Fully open source!{" "}
         <span className="text-sm font-medium underline">
